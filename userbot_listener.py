@@ -113,54 +113,38 @@ async def callback_help_channel(update: Update, context: ContextTypes.DEFAULT_TY
 # ---------------------------------------------------------------------------
 # Relay logic
 # ---------------------------------------------------------------------------
-async def relay_message(event: events.NewMessage.Event):
-    """Forward a new message from SOURCE_GROUP to DEST_GROUP via the bot."""
-    msg = event.message
-    sender = await event.get_sender()
-
-    # Build sender identity string
-    if sender is None:
-        sender_name = "Unknown"
-    elif getattr(sender, "first_name", None):
-        sender_name = sender.first_name
-        if getattr(sender, "last_name", None):
-            sender_name += " " + sender.last_name
-    elif getattr(sender, "username", None):
-        sender_name = f"@{sender.username}"
-    else:
-        sender_name = "Unknown"
-
+async def _do_relay(msg):
+    """Actual send logic — runs as a background task."""
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     text = msg.text or ""
 
     if text:
-        formatted = f"**{sender_name}**: {text}"
         try:
-            await bot.send_message(chat_id=cfg["DEST_GROUP_ID"], text=formatted, parse_mode="Markdown")
-            log.info("RELAY OK | src_msg_id=%s ts=%s sender=%s", msg.id, timestamp, sender_name)
+            await bot.send_message(chat_id=cfg["DEST_GROUP_ID"], text=text)
+            log.info("RELAY OK | src_msg_id=%s ts=%s", msg.id, timestamp)
         except Exception as exc:
-            log.error("RELAY FAIL | src_msg_id=%s ts=%s sender=%s error=%s", msg.id, timestamp, sender_name, exc)
+            log.error("RELAY FAIL | src_msg_id=%s ts=%s error=%s", msg.id, timestamp, exc)
 
-    # Stretch goal: photos
     if msg.photo:
         try:
             photo_file = await msg.download_media(file=bytes)
-            caption = f"**{sender_name}**: {msg.text or ''}" if msg.text else f"**{sender_name}**"
-            await bot.send_photo(chat_id=cfg["DEST_GROUP_ID"], photo=photo_file, caption=caption, parse_mode="Markdown")
-            log.info("PHOTO RELAY OK | src_msg_id=%s ts=%s sender=%s", msg.id, timestamp, sender_name)
+            await bot.send_photo(chat_id=cfg["DEST_GROUP_ID"], photo=photo_file, caption=msg.text or "")
+            log.info("PHOTO RELAY OK | src_msg_id=%s ts=%s", msg.id, timestamp)
         except Exception as exc:
-            log.error("PHOTO RELAY FAIL | src_msg_id=%s ts=%s sender=%s error=%s", msg.id, timestamp, sender_name, exc)
-
-    # Stretch goal: documents (non-photo files)
+            log.error("PHOTO RELAY FAIL | src_msg_id=%s ts=%s error=%s", msg.id, timestamp, exc)
     elif msg.document:
         try:
             doc_file = await msg.download_media(file=bytes)
             filename = msg.file.name or "document"
-            caption = f"**{sender_name}**: {msg.text or ''}" if msg.text else f"**{sender_name}**"
-            await bot.send_document(chat_id=cfg["DEST_GROUP_ID"], document=doc_file, filename=filename, caption=caption, parse_mode="Markdown")
-            log.info("DOC RELAY OK | src_msg_id=%s ts=%s sender=%s file=%s", msg.id, timestamp, sender_name, filename)
+            await bot.send_document(chat_id=cfg["DEST_GROUP_ID"], document=doc_file, filename=filename, caption=msg.text or "")
+            log.info("DOC RELAY OK | src_msg_id=%s ts=%s file=%s", msg.id, timestamp, filename)
         except Exception as exc:
-            log.error("DOC RELAY FAIL | src_msg_id=%s ts=%s sender=%s error=%s", msg.id, timestamp, sender_name, exc)
+            log.error("DOC RELAY FAIL | src_msg_id=%s ts=%s error=%s", msg.id, timestamp, exc)
+
+
+async def relay_message(event: events.NewMessage.Event):
+    """Fire-and-forget relay — handler returns instantly, send runs in background."""
+    asyncio.create_task(_do_relay(event.message))
 
 
 # ---------------------------------------------------------------------------
