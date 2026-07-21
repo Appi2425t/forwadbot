@@ -10,7 +10,7 @@ A stateless Telegram message relay that listens in a source group (via a userbot
 
 ## Prerequisites
 
-1. **Telegram API credentials**: Go to [my.telegram.org](https://my.telegram.org), create an app, note your `API_ID` and `API_HASH`.
+1. **Telegram API credentials**: Go to [my.telegram.org](   ), create an app, note your `API_ID` and `API_HASH`.
 2. **Bot token**: Create a bot via [@BotFather](https://t.me/BotFather), get the token, and add the bot to your destination group as a member (admin recommended).
 3. **Group IDs**: You need the numeric IDs for both source and destination groups. You can get these by forwarding a message from the group to [@userinfobot](https://t.me/userinfobot) or using the Telegram API.
 
@@ -27,16 +27,31 @@ It will prompt for your phone number and the OTP you receive via Telegram. It th
 
 ## Step 2: Set Environment Variables in Railway
 
-In your Railway project dashboard, go to the **Variables** tab and add:
+**Option A — Raw Editor (easiest):**
 
-| Variable | Description |
-|---|---|
-| `API_ID` | From my.telegram.org |
-| `API_HASH` | From my.telegram.org |
-| `SESSION_STRING` | Output from `generate_session.py` |
-| `SOURCE_GROUP_ID` | Numeric ID of the group to listen in |
-| `BOT_TOKEN` | From @BotFather |
-| `DEST_GROUP_ID` | Numeric ID of the group to post into |
+1. In Railway dashboard, go to your service → **Variables** tab.
+2. Click **Raw Editor**.
+3. Paste this and fill in your values:
+
+```
+API_ID=your_api_id
+API_HASH=your_api_hash
+SESSION_STRING=your_session_string
+SOURCE_GROUP_ID=-1001234567890
+BOT_TOKEN=your_bot_token
+DEST_GROUP_ID=-1001234567891
+```
+
+4. Click Save.
+
+**Option B — Railway CLI script:**
+
+```bash
+pip install -r requirements.txt
+python setup_railway_vars.py
+```
+
+It will prompt for each value and set them via `railway variables set`.
 
 > Group IDs are negative numbers (e.g. `-1001234567890`). For supergroups, they typically start with `-100`.
 

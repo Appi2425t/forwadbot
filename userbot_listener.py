@@ -12,7 +12,8 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
-from telegram import Bot
+from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 # ---------------------------------------------------------------------------
 # Config — validate all required env vars at startup
@@ -64,6 +65,27 @@ log = logging.getLogger("forwarder")
 # ---------------------------------------------------------------------------
 userbot = TelegramClient(StringSession(cfg["SESSION_STRING"]), cfg["API_ID"], cfg["API_HASH"])
 bot = Bot(token=cfg["BOT_TOKEN"])
+
+
+# ---------------------------------------------------------------------------
+# Bot commands — /start panel
+# ---------------------------------------------------------------------------
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show a panel with an Add to Channel button."""
+    bot_username = context.bot.username
+    add_url = f"https://t.me/{bot_username}?startgroup=true"
+
+    keyboard = [
+        [InlineKeyboardButton("➕ Add to Channel", url=add_url)],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    text = (
+        "🤖 **Telegram Forwarder Bot**\n\n"
+        "I relay messages from a source group to a destination group.\n\n"
+        "Use the button below to add me to your channel or group."
+    )
+    await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +152,15 @@ async def main():
     log.info("Starting Telegram forwarder...")
     log.info("Source group: %s | Dest group: %s", cfg["SOURCE_GROUP_ID"], cfg["DEST_GROUP_ID"])
 
+    # Start bot command handler
+    app = Application.builder().token(cfg["BOT_TOKEN"]).build()
+    app.add_handler(CommandHandler("start", cmd_start))
+
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+    log.info("Bot polling started — /start command active")
+
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             if not userbot.is_connected():
@@ -141,7 +172,7 @@ async def main():
 
             await userbot.run_until_disconnected()
             log.info("Userbot disconnected cleanly — exiting")
-            return
+            break
         except Exception as exc:
             log.error("Attempt %s/%s failed: %s", attempt, MAX_RETRIES, exc)
             if attempt < MAX_RETRIES:
@@ -150,6 +181,10 @@ async def main():
             else:
                 log.error("Max retries reached — exiting, Railway will restart")
                 sys.exit(1)
+
+    await app.updater.stop()
+    await app.stop()
+    await app.shutdown()
 
 
 if __name__ == "__main__":
