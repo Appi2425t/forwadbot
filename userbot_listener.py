@@ -83,6 +83,184 @@ pending_codes: list[dict] = []
 claimed_codes: set[str] = set()
 MAX_PENDING = 50
 
+# ---------------------------------------------------------------------------
+# NFT-style Username Generator
+# ---------------------------------------------------------------------------
+import random
+
+# NFT-themed word lists for generating cool, rare usernames
+NFT_PREFIXES = [
+    # Crypto/Web3 themed
+    "Crypto", "Blockchain", "Web3", "DeFi", "NFT", "Meta", "Digital",
+    # Rare/Mythical
+    "Rare", "Mythic", "Legend", "Phantom", "Shadow", "Neon", "Cyber",
+    "Cosmic", "Quantum", "Alpha", "Omega", "Zero", "Genesis", "Prime",
+    # Luxury/Premium
+    "Gold", "Diamond", "Platinum", "Royal", "Elite", "Supreme", "Apex",
+    # Gaming
+    "Pixel", "Retro", "Turbo", "Mega", "Ultra", "Hyper", "Neo",
+    # Sci-Fi
+    "Galaxy", "Stellar", "Nova", "Pulse", "Flux", "Vortex", "Nexus",
+    "Zenith", "Aether", "Cypher", "Daemon", "Vector",
+]
+
+NFT_SUFFIXES = [
+    # Status/Power
+    "Lord", "King", "Master", "Sage", "Wizard", "Mage", "Knight",
+    "Hunter", "Slayer", "Guardian", "Warrior", "Titan", "Giant",
+    # Animals (mythical)
+    "Dragon", "Phoenix", "Wolf", "Tiger", "Lion", "Eagle", "Hawk",
+    "Panther", "Raven", "Cobra", "Falcon", "Viper",
+    # Objects/Symbols
+    "Coin", "Token", "Vault", "Fortune", "Treasure", "Gem", "Stone",
+    "Crystal", "Orb", "Crown", "Blade", "Shield",
+    # Abstract
+    "Mind", "Soul", "Spirit", "Force", "Power", "Edge", "Core",
+    "Matrix", "Prism", "Spectrum",
+]
+
+NFT_WORDS = [
+    # Single powerful words
+    "Apex", "Blaze", "Cipher", "Dusk", "Echo", "Frost",
+    "Glimmer", "Havoc", "Inferno", "Jinx", "Karma", "Lunar",
+    "Mystic", "Nebula", "Obsidian", "Prism", "Rune", "Shadow",
+    "Thorn", "Umbra", "Void", "Wraith", "Xenon", "Zenith",
+    "Arctic", "Bolt", "Cosmos", "Delta", "Ember", "Fury",
+    "Ghost", "Hollow", "Iron", "Jade", "Keystone", "Lotus",
+    "Monarch", "Nimbus", "Oracle", "Phantom", "Rogue", "Spark",
+    "Tempest", "Unity", "Viper", "Wanderer", "Xeno", "Yeti", "Zephyr",
+]
+
+# Numbers that look cool
+COOL_NUMBERS = ["0", "1", "42", "69", "77", "88", "99", "100", "1337", "420", "777", "888", "999"]
+
+def generate_nft_username(style: str = "random") -> str:
+    """
+    Generate a cool NFT-style username.
+    Styles: 'rare', 'cyber', 'mythic', 'clean', 'random'
+    """
+    style = style.lower()
+    
+    if style == "rare":
+        # Short, punchy, rare-looking
+        return random.choice(NFT_WORDS).lower() + random.choice(COOL_NUMBERS)
+    
+    elif style == "cyber":
+        # Cyber/tech themed
+        prefix = random.choice(["Cyber", "Neo", "Quantum", "Pixel", "Turbo", "Hyper"])
+        suffix = random.choice(["Punk", "Net", "Tech", "Bot", "Node", "Core", "Flux"])
+        num = random.choice(COOL_NUMBERS)
+        return f"{prefix}{suffix}{num}".lower()
+    
+    elif style == "mythic":
+        # Mythical/legendary
+        prefix = random.choice(["Mythic", "Legend", "Ancient", "Eternal", "Divine"])
+        suffix = random.choice(["Soul", "Force", "Blade", "Crown", "Orb"])
+        return f"{prefix}{suffix}".lower()
+    
+    elif style == "clean":
+        # Clean, minimal
+        word = random.choice(NFT_WORDS).lower()
+        num = random.choice(["", "_", random.choice(COOL_NUMBERS)])
+        return word + num
+    
+    else:  # random
+        combo = random.randint(1, 4)
+        if combo == 1:
+            # Prefix + Suffix
+            return f"{random.choice(NFT_PREFIXES)}{random.choice(NFT_SUFFIXES)}".lower()
+        elif combo == 2:
+            # Single word + number
+            return f"{random.choice(NFT_WORDS)}{random.choice(COOL_NUMBERS)}".lower()
+        elif combo == 3:
+            # Word_Word
+            return f"{random.choice(NFT_WORDS)}_{random.choice(NFT_WORDS)}".lower()
+        else:
+            # Prefix + Suffix + number
+            return f"{random.choice(NFT_PREFIXES)}{random.choice(NFT_SUFFIXES)}{random.choice(COOL_NUMBERS)}".lower()
+
+
+def generate_unique_usernames(count: int = 10, style: str = "random") -> list[str]:
+    """Generate a list of unique NFT-style usernames."""
+    usernames = set()
+    attempts = 0
+    max_attempts = count * 10
+    
+    while len(usernames) < count and attempts < max_attempts:
+        username = generate_nft_username(style)
+        # Telegram usernames: 5-32 chars, alphanumeric + underscores
+        if 5 <= len(username) <= 32 and all(c.isalnum() or c == '_' for c in username):
+            usernames.add(username)
+        attempts += 1
+    
+    return list(usernames)
+
+
+async def check_username_availability(username: str) -> dict:
+    """
+    Check if a Telegram username is available.
+    Returns: {"username": str, "available": bool, "reason": str}
+    """
+    try:
+        from telethon.errors import UsernameNotOccupiedError, UsernameInvalidError
+        # Try to resolve the username - if it exists, it will return a user
+        entity = await userbot.get_entity(username)
+        return {
+            "username": username,
+            "available": False,
+            "reason": f"Taken by @{entity.username or entity.id}"
+        }
+    except UsernameNotOccupiedError:
+        # Username not found = available
+        return {
+            "username": username,
+            "available": True,
+            "reason": "Available!"
+        }
+    except UsernameInvalidError:
+        return {
+            "username": username,
+            "available": False,
+            "reason": "Invalid username format"
+        }
+    except Exception as e:
+        return {
+            "username": username,
+            "available": False,
+            "reason": f"Error: {str(e)}"
+        }
+
+
+async def find_available_usernames(count: int = 10, style: str = "random") -> list[dict]:
+    """
+    Generate and check availability of NFT-style usernames.
+    Returns list of {"username": str, "available": bool, "reason": str}
+    """
+    usernames = generate_unique_usernames(count * 3, style)  # Generate extra to account for taken ones
+    results = []
+    
+    # Check availability concurrently with semaphore
+    sem = asyncio.Semaphore(5)  # Limit concurrent requests
+    
+    async def check_with_limit(uname):
+        async with sem:
+            return await check_username_availability(uname)
+    
+    tasks = [check_with_limit(u) for u in usernames]
+    
+    all_results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    available_count = 0
+    for result in all_results:
+        if isinstance(result, dict):
+            results.append(result)
+            if result["available"]:
+                available_count += 1
+                if available_count >= count:
+                    break
+    
+    return results
+
 
 def extract_codes(text: str) -> list[str]:
     """Extract codes from message text."""
@@ -205,6 +383,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("👥 Add to Group", url=add_group_url)],
         [InlineKeyboardButton("📢 How to Add to Channel", callback_data="help_channel")],
+        [InlineKeyboardButton("🎲 Generate NFT Usernames", callback_data="gen_usernames")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -213,9 +392,84 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "I relay messages from a source group/channel to a destination group/channel.\n\n"
         "**Choose an option below:**\n"
         "• **Group** — tap the button to add me directly\n"
-        "• **Channel** — I'll show you how to add me as admin"
+        "• **Channel** — I'll show you how to add me as admin\n"
+        "• **NFT Usernames** — generate cool available usernames"
     )
     await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+
+
+async def cmd_gen_usernames(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Generate NFT-style usernames and check availability."""
+    args = context.args
+    count = 10
+    style = "random"
+    
+    if args:
+        try:
+            count = min(int(args[0]), 20)  # Max 20
+        except ValueError:
+            pass
+    if len(args) > 1:
+        style = args[1].lower()
+    
+    await update.message.reply_text(f"🔍 Generating {count} {style} usernames and checking availability...")
+    
+    results = await find_available_usernames(count, style)
+    
+    available = [r for r in results if r["available"]]
+    taken = [r for r in results if not r["available"]]
+    
+    if not available:
+        text = "❌ No available usernames found. Try again or change style."
+        await update.message.reply_text(text)
+        return
+    
+    text_lines = [f"✅ **Found {len(available)} Available Usernames:**\n"]
+    
+    for i, r in enumerate(available[:10], 1):
+        text_lines.append(f"{i}. @{r['username']}")
+    
+    if taken:
+        text_lines.append(f"\n📊 *Checked {len(results)} | {len(available)} available | {len(taken)} taken*")
+    
+    text_lines.append("\n💡 *Copy any username and claim it fast!*")
+    
+    await update.message.reply_text("\n".join(text_lines), parse_mode="Markdown")
+
+
+async def callback_gen_usernames(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle Generate NFT Usernames button."""
+    query = update.callback_query
+    await query.answer()
+    
+    # Simulate /gen command
+    await query.edit_message_text("🔍 Generating 10 random usernames and checking availability...")
+    
+    results = await find_available_usernames(10, "random")
+    
+    available = [r for r in results if r["available"]]
+    taken = [r for r in results if not r["available"]]
+    
+    if not available:
+        text = "❌ No available usernames found. Try /gen again."
+        await query.edit_message_text(text)
+        return
+    
+    text_lines = [f"✅ **Found {len(available)} Available Usernames:**\n"]
+    
+    for i, r in enumerate(available[:10], 1):
+        text_lines.append(f"{i}. @{r['username']}")
+    
+    if taken:
+        text_lines.append(f"\n📊 *Checked {len(results)} | {len(available)} available | {len(taken)} taken*")
+    
+    text_lines.append("\n💡 *Copy any username and claim it fast!*")
+    
+    # Add back button
+    keyboard = [[InlineKeyboardButton("🔄 Generate More", callback_data="gen_usernames")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text("\n".join(text_lines), parse_mode="Markdown", reply_markup=reply_markup)
 
 
 async def callback_help_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -313,7 +567,10 @@ async def main():
     # Start bot command handler
     app = Application.builder().token(cfg["BOT_TOKEN"]).build()
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("gen", cmd_gen_usernames))
+    app.add_handler(CommandHandler("usernames", cmd_gen_usernames))
     app.add_handler(CallbackQueryHandler(callback_help_channel, pattern="^help_channel$"))
+    app.add_handler(CallbackQueryHandler(callback_gen_usernames, pattern="^gen_usernames$"))
 
     await app.initialize()
     await app.start()
