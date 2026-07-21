@@ -154,15 +154,18 @@ async def push_code_to_sse(code: str, message: str = ""):
         sse_clients.remove(d)
 
 
-def start_http_server():
+async def start_http_server():
     """Start the HTTP API server on Railway's PORT."""
     app = web.Application()
     app.router.add_get("/api/stream", handle_sse)
     app.router.add_get("/api/status", handle_status)
 
     port = int(os.environ.get("PORT", 8080))
-    log.info("HTTP API starting on port %s", port)
-    web.run_app(app, port=port, print=None)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    log.info("HTTP API started on port %s", port)
 
 
 async def handle_status(request: web.Request) -> web.Response:
@@ -287,10 +290,8 @@ async def main():
     log.info("Starting Telegram forwarder...")
     log.info("Source group: %s | Dest group: %s", cfg["SOURCE_GROUP_ID"], cfg["DEST_GROUP_ID"])
 
-    # Start HTTP API server in background thread
-    import threading
-    http_thread = threading.Thread(target=start_http_server, daemon=True)
-    http_thread.start()
+    # Start HTTP API server
+    await start_http_server()
 
     # Start bot command handler
     app = Application.builder().token(cfg["BOT_TOKEN"]).build()
