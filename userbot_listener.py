@@ -127,7 +127,7 @@ async def handle_sse(request: web.Request) -> web.StreamResponse:
 
         # Keep connection alive, wait for disconnect
         while True:
-            await asyncio.sleep(30)
+            await asyncio.sleep(10)
             await response.write(b": heartbeat\n\n")
     except (ConnectionResetError, asyncio.CancelledError):
         pass
