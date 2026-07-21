@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
 # ---------------------------------------------------------------------------
 # Config — validate all required env vars at startup
@@ -71,21 +71,43 @@ bot = Bot(token=cfg["BOT_TOKEN"])
 # Bot commands — /start panel
 # ---------------------------------------------------------------------------
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show a panel with an Add to Channel button."""
+    """Show a panel with Add to Group and Add to Channel buttons."""
     bot_username = context.bot.username
-    add_url = f"https://t.me/{bot_username}?startgroup=true"
+    add_group_url = f"https://t.me/{bot_username}?startgroup=true"
 
     keyboard = [
-        [InlineKeyboardButton("➕ Add to Channel", url=add_url)],
+        [InlineKeyboardButton("👥 Add to Group", url=add_group_url)],
+        [InlineKeyboardButton("📢 How to Add to Channel", callback_data="help_channel")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     text = (
         "🤖 **Telegram Forwarder Bot**\n\n"
-        "I relay messages from a source group to a destination group.\n\n"
-        "Use the button below to add me to your channel or group."
+        "I relay messages from a source group/channel to a destination group/channel.\n\n"
+        "**Choose an option below:**\n"
+        "• **Group** — tap the button to add me directly\n"
+        "• **Channel** — I'll show you how to add me as admin"
     )
     await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+
+
+async def callback_help_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show instructions for adding bot to a channel."""
+    query = update.callback_query
+    await query.answer()
+
+    text = (
+        "📢 **How to Add Bot to a Channel:**\n\n"
+        "1. Open your channel in Telegram\n"
+        "2. Tap the channel name → **Administrators**\n"
+        "3. Tap **Add Admin**\n"
+        "4. Search for `@{bot}` and select it\n"
+        "5. Enable **Post Messages** permission\n"
+        "6. Tap **Save**\n\n"
+        "Then set the channel ID as `DEST_GROUP_ID` in Railway."
+    ).format(bot=context.bot.username)
+
+    await query.edit_message_text(text, parse_mode="Markdown")
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +177,7 @@ async def main():
     # Start bot command handler
     app = Application.builder().token(cfg["BOT_TOKEN"]).build()
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CallbackQueryHandler(callback_help_channel, pattern="^help_channel$"))
 
     await app.initialize()
     await app.start()
