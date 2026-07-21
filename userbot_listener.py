@@ -4,8 +4,10 @@ Single asyncio process: Telethon client listens, python-telegram-bot relays.
 """
 
 import asyncio
+import json
 import logging
 import os
+import re
 import sys
 from datetime import datetime, timezone
 
@@ -14,6 +16,7 @@ from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+from aiohttp import web
 
 # ---------------------------------------------------------------------------
 # Config — validate all required env vars at startup
@@ -65,6 +68,105 @@ log = logging.getLogger("forwarder")
 # ---------------------------------------------------------------------------
 userbot = TelegramClient(StringSession(cfg["SESSION_STRING"]), cfg["API_ID"], cfg["API_HASH"])
 bot = Bot(token=cfg["BOT_TOKEN"])
+
+# ---------------------------------------------------------------------------
+# Code detection & pending codes store
+# ---------------------------------------------------------------------------
+# Matches "Code: stakecomszwg4qu7r8e9t5" style messages
+CODE_PATTERNS = [
+    re.compile(r"Code:\s*([A-Za-z0-9]{6,30})", re.IGNORECASE),
+    re.compile(r"(?:code|promo|drop|claim|bonus)[:\s]+([A-Za-z0-9]{4,20})", re.IGNORECASE),
+]
+
+pending_codes: list[dict] = []
+claimed_codes: set[str] = set()
+MAX_PENDING = 50
+
+
+def extract_codes(text: str) -> list[str]:
+    """Extract potential codes from message text."""
+    codes = []
+    for pattern in CODE_PATTERNS:
+        for match in pattern.finditer(text):
+            code = match.group(1).strip()
+            if code not in claimed_codes and code not in codes:
+                codes.append(code)
+    return codes
+
+
+# ---------------------------------------------------------------------------
+# SSE — push codes to browser extension in real-time
+# ---------------------------------------------------------------------------
+sse_clients: list[web.StreamResponse] = []
+
+
+async def handle_sse(request: web.Request) -> web.StreamResponse:
+    """GET /api/stream — SSE endpoint, pushes codes as they arrive."""
+    response = web.StreamResponse(
+        status=200,
+        reason="OK",
+        headers={
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+    await response.prepare(request)
+    sse_clients.append(response)
+    log.info("SSE client connected (%d total)", len(sse_clients))
+
+    try:
+        # Send initial heartbeat
+        await response.write(b"event: connected\ndata: ok\n\n")
+
+        # Keep connection alive, wait for disconnect
+        while True:
+            await asyncio.sleep(30)
+            await response.write(b": heartbeat\n\n")
+    except (ConnectionResetError, asyncio.CancelledError):
+        pass
+    finally:
+        if response in sse_clients:
+            sse_clients.remove(response)
+            log.info("SSE client disconnected (%d total)", len(sse_clients))
+
+    return response
+
+
+async def push_code_to_sse(code: str, message: str = ""):
+    """Broadcast a code to all connected SSE clients."""
+    import json as _json
+    data = _json.dumps({"code": code, "message": message})
+    payload = f"event: code\ndata: {data}\n\n"
+    dead = []
+    for client in sse_clients:
+        try:
+            await client.write(payload.encode())
+        except Exception:
+            dead.append(client)
+    for d in dead:
+        sse_clients.remove(d)
+
+
+def start_http_server():
+    """Start the HTTP API server on Railway's PORT."""
+    app = web.Application()
+    app.router.add_get("/api/stream", handle_sse)
+    app.router.add_get("/api/status", handle_status)
+
+    port = int(os.environ.get("PORT", 8080))
+    log.info("HTTP API starting on port %s", port)
+    web.run_app(app, port=port, print=None)
+
+
+async def handle_status(request: web.Request) -> web.Response:
+    """GET /api/status — health check."""
+    return web.json_response({
+        "status": "ok",
+        "clients": len(sse_clients),
+        "claimed": len(claimed_codes),
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -119,9 +221,31 @@ async def _do_relay(msg):
     text = msg.text or ""
 
     if text:
+        # Detect codes
+        codes = extract_codes(text)
+        for code in codes:
+            entry = {
+                "code": code,
+                "message": text,
+                "timestamp": timestamp,
+                "msg_id": msg.id,
+            }
+            pending_codes.append(entry)
+            log.info("CODE DETECTED: %s", code)
+            if len(pending_codes) > MAX_PENDING:
+                pending_codes.pop(0)
+            # Push to browser extension instantly via SSE
+            await push_code_to_sse(code, text)
+
+        # If codes found, forward ONLY the code. Otherwise forward full message.
+        if codes:
+            forward_text = codes[0]
+        else:
+            forward_text = text
+
         try:
-            await bot.send_message(chat_id=cfg["DEST_GROUP_ID"], text=text)
-            log.info("RELAY OK | src_msg_id=%s ts=%s", msg.id, timestamp)
+            await bot.send_message(chat_id=cfg["DEST_GROUP_ID"], text=forward_text)
+            log.info("RELAY OK | src_msg_id=%s ts=%s codes=%s", msg.id, timestamp, codes)
         except Exception as exc:
             log.error("RELAY FAIL | src_msg_id=%s ts=%s error=%s", msg.id, timestamp, exc)
 
@@ -157,6 +281,11 @@ RETRY_DELAY = 10  # seconds
 async def main():
     log.info("Starting Telegram forwarder...")
     log.info("Source group: %s | Dest group: %s", cfg["SOURCE_GROUP_ID"], cfg["DEST_GROUP_ID"])
+
+    # Start HTTP API server in background thread
+    import threading
+    http_thread = threading.Thread(target=start_http_server, daemon=True)
+    http_thread.start()
 
     # Start bot command handler
     app = Application.builder().token(cfg["BOT_TOKEN"]).build()
