@@ -159,6 +159,8 @@ async def start_http_server():
     app = web.Application()
     app.router.add_get("/api/stream", handle_sse)
     app.router.add_get("/api/status", handle_status)
+    app.router.add_get("/api/codes", handle_get_codes)
+    app.router.add_post("/api/claimed", handle_claimed)
 
     port = int(os.environ.get("PORT", 8080))
     runner = web.AppRunner(app)
@@ -172,9 +174,24 @@ async def handle_status(request: web.Request) -> web.Response:
     """GET /api/status — health check."""
     return web.json_response({
         "status": "ok",
-        "clients": len(sse_clients),
         "claimed": len(claimed_codes),
     })
+
+
+async def handle_get_codes(request: web.Request) -> web.Response:
+    """GET /api/codes — returns unclaimed codes."""
+    unclaimed = [c for c in pending_codes if c["code"] not in claimed_codes]
+    return web.json_response(unclaimed)
+
+
+async def handle_claimed(request: web.Request) -> web.Response:
+    """POST /api/claimed — mark a code as claimed."""
+    data = await request.json()
+    code = data.get("code")
+    if code:
+        claimed_codes.add(code)
+        log.info("Code marked as claimed: %s", code)
+    return web.json_response({"ok": True})
 
 
 # ---------------------------------------------------------------------------
