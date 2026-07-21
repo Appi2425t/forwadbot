@@ -72,10 +72,10 @@ bot = Bot(token=cfg["BOT_TOKEN"])
 # ---------------------------------------------------------------------------
 # Code detection & pending codes store
 # ---------------------------------------------------------------------------
-# Matches "Code: stakecomszwg4qu7r8e9t5" style messages
+# Only matches "Code: xxxxxxxx" — ignores "Claim limit", "Value", etc.
 CODE_PATTERNS = [
+    re.compile(r"^Code:\s*([A-Za-z0-9]{6,30})$", re.MULTILINE | re.IGNORECASE),
     re.compile(r"Code:\s*([A-Za-z0-9]{6,30})", re.IGNORECASE),
-    re.compile(r"(?:code|promo|drop|claim|bonus)[:\s]+([A-Za-z0-9]{4,20})", re.IGNORECASE),
 ]
 
 pending_codes: list[dict] = []
@@ -84,11 +84,17 @@ MAX_PENDING = 50
 
 
 def extract_codes(text: str) -> list[str]:
-    """Extract potential codes from message text."""
+    """Extract codes from message text. Only matches 'Code: xxxxxx' lines."""
     codes = []
     for pattern in CODE_PATTERNS:
         for match in pattern.finditer(text):
             code = match.group(1).strip()
+            # Skip pure numbers (like "1000" from "Claim limit: 1000")
+            if code.isdigit():
+                continue
+            # Must contain at least one letter
+            if not any(c.isalpha() for c in code):
+                continue
             if code not in claimed_codes and code not in codes:
                 codes.append(code)
     return codes
