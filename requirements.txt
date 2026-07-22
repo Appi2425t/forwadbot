@@ -2,3 +2,4 @@ telethon
 python-telegram-bot
 python-dotenv
 aiohttp
+redis[hiredis]

@@ -84,68 +84,94 @@ claimed_codes: set[str] = set()
 MAX_PENDING = 50
 
 # ---------------------------------------------------------------------------
-# Activation codes store (JSON file persistence)
+# Activation codes store (Redis persistence)
 # ---------------------------------------------------------------------------
 import uuid
 import hashlib
 import json
+import redis
 
-ACTIVATION_CODES_FILE = os.path.join(os.path.dirname(__file__), "activation_codes.json")
-activation_codes: dict[str, dict] = {}  # code -> {created_at, used_by, expires_at}
+# Redis connection
+REDIS_URL = os.environ.get("REDIS_URL", "")
+redis_client = None
+if REDIS_URL:
+    try:
+        redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+        redis_client.ping()
+        log.info("Redis connected successfully")
+    except Exception as e:
+        log.error("Redis connection failed: %s — falling back to memory", e)
+        redis_client = None
+
+# Fallback to memory if Redis not available
+activation_codes: dict[str, dict] = {}
 ADMIN_USER_IDS = [int(x) for x in os.environ.get('ADMIN_USER_IDS', '').split(',') if x]
+
+REDIS_KEY = "sc:activation_codes"
 
 
 def load_activation_codes():
-    """Load activation codes from JSON file."""
+    """Load activation codes from Redis."""
     global activation_codes
-    try:
-        if os.path.exists(ACTIVATION_CODES_FILE):
-            with open(ACTIVATION_CODES_FILE, "r") as f:
-                activation_codes = json.load(f)
-            log.info("Loaded %d activation codes from file", len(activation_codes))
-        else:
+    if redis_client:
+        try:
+            data = redis_client.get(REDIS_KEY)
+            if data:
+                activation_codes = json.loads(data)
+                log.info("Loaded %d activation codes from Redis", len(activation_codes))
+            else:
+                activation_codes = {}
+                log.info("No activation codes in Redis, starting empty")
+        except Exception as e:
+            log.error("Failed to load from Redis: %s", e)
             activation_codes = {}
-            log.info("No activation codes file found, starting empty")
-    except Exception as e:
-        log.error("Failed to load activation codes: %s", e)
+    else:
         activation_codes = {}
+        log.info("Redis not available, using memory storage")
 
 
 def save_activation_codes():
-    """Save activation codes to JSON file."""
-    try:
-        with open(ACTIVATION_CODES_FILE, "w") as f:
-            json.dump(activation_codes, f, indent=2)
-    except Exception as e:
-        log.error("Failed to save activation codes: %s", e)
+    """Save activation codes to Redis."""
+    if redis_client:
+        try:
+            redis_client.set(REDIS_KEY, json.dumps(activation_codes))
+        except Exception as e:
+            log.error("Failed to save to Redis: %s", e)
 
 
 def generate_activation_code(duration_days: int = 30) -> str:
     """Generate a unique activation code in format XXXX-XXXX-XXXX-XXXX."""
     while True:
-        # Generate 16 random hex characters
         raw = uuid.uuid4().hex[:16].upper()
-        # Format as XXXX-XXXX-XXXX-XXXX
         code = '-'.join([raw[i:i+4] for i in range(0, 16, 4)])
-        # Ensure uniqueness
         if code not in activation_codes:
             return code
 
 
 def validate_activation_code(code: str) -> dict:
     """Validate an activation code. Returns {valid: bool, message: str, expires_at: str}."""
+    # Master code from environment variable (always works, survives restarts)
+    master_code = os.environ.get("MASTER_ACTIVATION_CODE", "").strip().upper()
+    if master_code and code.upper() == master_code:
+        return {
+            "valid": True,
+            "message": "Master activation code is valid",
+            "expires_at": None,
+            "created_at": "master"
+        }
+
     if code not in activation_codes:
         return {"valid": False, "message": "Invalid activation code"}
-    
+
     entry = activation_codes[code]
-    
+
     # Check if expired
     if entry.get("expires_at"):
         from datetime import datetime, timezone
         expires = datetime.fromisoformat(entry["expires_at"])
         if datetime.now(timezone.utc) > expires:
             return {"valid": False, "message": "Activation code has expired"}
-    
+
     return {
         "valid": True,
         "message": "Activation code is valid",
@@ -162,7 +188,6 @@ def store_activation_code(code: str, duration_days: int = 30) -> dict:
     now = datetime.now(timezone.utc)
 
     if duration_days == 0:
-        # Permanent code — no expiration
         activation_codes[code] = {
             "created_at": now.isoformat(),
             "expires_at": None,
@@ -922,6 +947,104 @@ async def relay_message(event: events.NewMessage.Event):
 
 
 # ---------------------------------------------------------------------------
+# Database backup/restore commands
+# ---------------------------------------------------------------------------
+async def cmd_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Download activation codes database as JSON file."""
+    user_id = update.effective_user.id
+
+    if ADMIN_USER_IDS and user_id not in ADMIN_USER_IDS:
+        await update.message.reply_text("❌ You don't have permission.")
+        return
+
+    # Get count
+    count = len(activation_codes)
+    if count == 0:
+        await update.message.reply_text("📭 No activation codes to download.")
+        return
+
+    # Create JSON file
+    json_data = json.dumps(activation_codes, indent=2)
+    file_bytes = json_data.encode('utf-8')
+
+    # Send as document
+    from io import BytesIO
+    bio = BytesIO(file_bytes)
+    bio.name = f"activation_codes_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
+
+    await update.message.reply_document(
+        document=bio,
+        caption=f"📦 **Database Backup**\n\n"
+                f"📊 Total codes: **{count}**\n"
+                f"📅 Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+                f"💡 *Keep this file safe! Use /uwon to restore.*",
+        parse_mode="Markdown"
+    )
+    log.info("Database downloaded by user %s — %d codes", user_id, count)
+
+
+async def cmd_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Restore activation codes from uploaded JSON file."""
+    user_id = update.effective_user.id
+
+    if ADMIN_USER_IDS and user_id not in ADMIN_USER_IDS:
+        await update.message.reply_text("❌ You don't have permission.")
+        return
+
+    # Check if file is attached
+    if not update.message.document:
+        await update.message.reply_text(
+            "📤 **How to restore:**\n\n"
+            "1. Send the backup JSON file\n"
+            "2. Add caption: `/uwon`\n\n"
+            "Or reply to a backup file with `/uwon`",
+            parse_mode="Markdown"
+        )
+        return
+
+    # Download the file
+    try:
+        file = await context.bot.get_file(update.message.document.file_id)
+        file_bytes = await file.download_as_bytearray()
+        json_str = file_bytes.decode('utf-8')
+        new_codes = json.loads(json_str)
+
+        # Validate structure
+        if not isinstance(new_codes, dict):
+            await update.message.reply_text("❌ Invalid file format.")
+            return
+
+        # Count new vs existing
+        new_count = 0
+        updated_count = 0
+        for code, data in new_codes.items():
+            if code in activation_codes:
+                updated_count += 1
+            else:
+                new_count += 1
+            activation_codes[code] = data
+
+        # Save to Redis
+        save_activation_codes()
+
+        await update.message.reply_text(
+            f"✅ **Database Restored!**\n\n"
+            f"🆕 New codes added: **{new_count}**\n"
+            f"🔄 Existing codes updated: **{updated_count}**\n"
+            f"📊 Total codes now: **{len(activation_codes)}**\n\n"
+            f"💡 *All codes are now active.*",
+            parse_mode="Markdown"
+        )
+        log.info("Database restored by user %s — %d new, %d updated", user_id, new_count, updated_count)
+
+    except json.JSONDecodeError:
+        await update.message.reply_text("❌ Invalid JSON file.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+        log.error("Upload failed: %s", e)
+
+
+# ---------------------------------------------------------------------------
 # Main — reconnect loop
 # ---------------------------------------------------------------------------
 MAX_RETRIES = 5
@@ -932,7 +1055,7 @@ async def main():
     log.info("Starting Telegram forwarder...")
     log.info("Source group: %s | Dest group: %s", cfg["SOURCE_GROUP_ID"], cfg["DEST_GROUP_ID"])
 
-    # Load activation codes from file
+    # Load activation codes from Redis
     load_activation_codes()
 
     # Start HTTP API server
@@ -945,6 +1068,8 @@ async def main():
     app.add_handler(CommandHandler("usernames", cmd_gen_usernames))
     app.add_handler(CommandHandler("genkey", cmd_genkey))
     app.add_handler(CommandHandler("keys", cmd_list_keys))
+    app.add_handler(CommandHandler("dwon", cmd_download))
+    app.add_handler(CommandHandler("uwon", cmd_upload))
     app.add_handler(CallbackQueryHandler(callback_help_channel, pattern="^help_channel$"))
     app.add_handler(CallbackQueryHandler(callback_help_activate, pattern="^help_activate$"))
     app.add_handler(CallbackQueryHandler(callback_gen_usernames, pattern="^gen_usernames$"))
