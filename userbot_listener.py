@@ -148,8 +148,10 @@ def generate_activation_code(duration_days: int = 30) -> str:
             return code
 
 
-def validate_activation_code(code: str) -> dict:
-    """Validate an activation code. Returns {valid: bool, message: str, expires_at: str}."""
+def validate_activation_code(code: str, user_id: str = None) -> dict:
+    """Validate an activation code. Returns {valid: bool, message: str, expires_at: str}.
+    user_id: unique identifier for the stake account (fingerprint).
+    """
     # Master code from environment variable (always works, survives restarts)
     master_code = os.environ.get("MASTER_ACTIVATION_CODE", "").strip().upper()
     if master_code and code.upper() == master_code:
@@ -172,11 +174,21 @@ def validate_activation_code(code: str) -> dict:
         if datetime.now(timezone.utc) > expires:
             return {"valid": False, "message": "Activation code has expired"}
 
+    # Check if code is already bound to a different account
+    if user_id and entry.get("bound_to") and entry["bound_to"] != user_id:
+        return {"valid": False, "message": "Code already used on another account"}
+
+    # Bind code to this account (first use wins)
+    if user_id and not entry.get("bound_to"):
+        entry["bound_to"] = user_id
+        save_activation_codes()
+
     return {
         "valid": True,
         "message": "Activation code is valid",
         "expires_at": entry.get("expires_at"),
-        "created_at": entry.get("created_at")
+        "created_at": entry.get("created_at"),
+        "bound_to": entry.get("bound_to")
     }
 
 
@@ -543,12 +555,13 @@ async def handle_activate(request: web.Request) -> web.Response:
     """POST /api/activate — validate an activation code."""
     data = await request.json()
     code = data.get("code", "").strip().upper()
+    user_id = data.get("user_id", "")  # Stake account fingerprint
 
     if not code:
         return web.json_response({"valid": False, "message": "No code provided"}, status=400)
 
-    result = validate_activation_code(code)
-    log.info("Activation attempt for code: %s — %s", code, result["message"])
+    result = validate_activation_code(code, user_id)
+    log.info("Activation attempt for code: %s user: %s — %s", code, user_id or "none", result["message"])
     return web.json_response(result)
 
 
