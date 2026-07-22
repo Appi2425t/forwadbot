@@ -84,6 +84,64 @@ claimed_codes: set[str] = set()
 MAX_PENDING = 50
 
 # ---------------------------------------------------------------------------
+# Activation codes store
+# ---------------------------------------------------------------------------
+import uuid
+import hashlib
+
+activation_codes: dict[str, dict] = {}  # code -> {created_at, used_by, expires_at}
+ADMIN_USER_IDS = [int(x) for x in os.environ.get('ADMIN_USER_IDS', '').split(',') if x]
+
+
+def generate_activation_code(duration_days: int = 30) -> str:
+    """Generate a unique activation code in format XXXX-XXXX-XXXX-XXXX."""
+    while True:
+        # Generate 16 random hex characters
+        raw = uuid.uuid4().hex[:16].upper()
+        # Format as XXXX-XXXX-XXXX-XXXX
+        code = '-'.join([raw[i:i+4] for i in range(0, 16, 4)])
+        # Ensure uniqueness
+        if code not in activation_codes:
+            return code
+
+
+def validate_activation_code(code: str) -> dict:
+    """Validate an activation code. Returns {valid: bool, message: str, expires_at: str}."""
+    if code not in activation_codes:
+        return {"valid": False, "message": "Invalid activation code"}
+    
+    entry = activation_codes[code]
+    
+    # Check if expired
+    if entry.get("expires_at"):
+        from datetime import datetime, timezone
+        expires = datetime.fromisoformat(entry["expires_at"])
+        if datetime.now(timezone.utc) > expires:
+            return {"valid": False, "message": "Activation code has expired"}
+    
+    return {
+        "valid": True,
+        "message": "Activation code is valid",
+        "expires_at": entry.get("expires_at"),
+        "created_at": entry.get("created_at")
+    }
+
+
+def store_activation_code(code: str, duration_days: int = 30) -> dict:
+    """Store a new activation code with expiration."""
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(days=duration_days)
+    
+    activation_codes[code] = {
+        "created_at": now.isoformat(),
+        "expires_at": expires.isoformat(),
+        "duration_days": duration_days,
+        "used_by": None
+    }
+    return {"code": code, "expires_at": expires.isoformat()}
+
+# ---------------------------------------------------------------------------
 # NFT-style Username Generator
 # ---------------------------------------------------------------------------
 import random
@@ -339,6 +397,8 @@ async def start_http_server():
     app.router.add_get("/api/status", handle_status)
     app.router.add_get("/api/codes", handle_get_codes)
     app.router.add_post("/api/claimed", handle_claimed)
+    app.router.add_post("/api/activate", handle_activate)
+    app.router.add_get("/api/activate/{code}", handle_validate_activation)
 
     port = int(os.environ.get("PORT", 8080))
     runner = web.AppRunner(app)
@@ -370,6 +430,31 @@ async def handle_claimed(request: web.Request) -> web.Response:
         claimed_codes.add(code)
         log.info("Code marked as claimed: %s", code)
     return web.json_response({"ok": True})
+
+
+async def handle_activate(request: web.Request) -> web.Response:
+    """POST /api/activate — validate an activation code."""
+    data = await request.json()
+    code = data.get("code", "").strip().upper()
+    
+    if not code:
+        return web.json_response({"valid": False, "message": "No code provided"}, status=400)
+    
+    result = validate_activation_code(code)
+    log.info("Activation attempt for code: %s — %s", code, result["message"])
+    return web.json_response(result)
+
+
+async def handle_validate_activation(request: web.Request) -> web.Response:
+    """GET /api/activate/{code} — validate an activation code via URL."""
+    code = request.match_info.get("code", "").strip().upper()
+    
+    if not code:
+        return web.json_response({"valid": False, "message": "No code provided"}, status=400)
+    
+    result = validate_activation_code(code)
+    log.info("Activation validation for code: %s — %s", code, result["message"])
+    return web.json_response(result)
 
 
 # ---------------------------------------------------------------------------
@@ -472,6 +557,73 @@ async def callback_gen_usernames(update: Update, context: ContextTypes.DEFAULT_T
     await query.edit_message_text("\n".join(text_lines), parse_mode="Markdown", reply_markup=reply_markup)
 
 
+async def cmd_genkey(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Generate activation codes for Stake Claimer extension."""
+    user_id = update.effective_user.id
+    
+    # Check if user is admin
+    if ADMIN_USER_IDS and user_id not in ADMIN_USER_IDS:
+        await update.message.reply_text("❌ You don't have permission to generate keys.")
+        return
+    
+    # Parse arguments: /genkey [count] [duration_days]
+    args = context.args
+    count = 1
+    duration_days = 30
+    
+    if args:
+        try:
+            count = min(int(args[0]), 10)  # Max 10 keys at once
+        except ValueError:
+            pass
+    if len(args) > 1:
+        try:
+            duration_days = int(args[1])
+        except ValueError:
+            pass
+    
+    # Generate codes
+    codes = []
+    for _ in range(count):
+        code = generate_activation_code(duration_days)
+        store_activation_code(code, duration_days)
+        codes.append(code)
+    
+    # Format response
+    text_lines = [f"🔑 **Generated {len(codes)} Activation Code(s):**\n"]
+    for i, code in enumerate(codes, 1):
+        text_lines.append(f"`{code}`")
+    text_lines.append(f"\n⏰ Duration: {duration_days} days")
+    text_lines.append("\n💡 *Send these codes to users to activate the extension.*")
+    
+    await update.message.reply_text("\n".join(text_lines), parse_mode="Markdown")
+
+
+async def cmd_list_keys(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List all active activation codes."""
+    user_id = update.effective_user.id
+    
+    # Check if user is admin
+    if ADMIN_USER_IDS and user_id not in ADMIN_USER_IDS:
+        await update.message.reply_text("❌ You don't have permission to view keys.")
+        return
+    
+    if not activation_codes:
+        await update.message.reply_text("📭 No activation codes generated yet.")
+        return
+    
+    text_lines = [f"📋 **Activation Codes ({len(activation_codes)} total):**\n"]
+    
+    for code, info in list(activation_codes.items())[:20]:  # Show max 20
+        status = "✅ Active"
+        text_lines.append(f"`{code}` — {status}")
+    
+    if len(activation_codes) > 20:
+        text_lines.append(f"\n... and {len(activation_codes) - 20} more")
+    
+    await update.message.reply_text("\n".join(text_lines), parse_mode="Markdown")
+
+
 async def callback_help_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show instructions for adding bot to a channel."""
     query = update.callback_query
@@ -569,6 +721,8 @@ async def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("gen", cmd_gen_usernames))
     app.add_handler(CommandHandler("usernames", cmd_gen_usernames))
+    app.add_handler(CommandHandler("genkey", cmd_genkey))
+    app.add_handler(CommandHandler("keys", cmd_list_keys))
     app.add_handler(CallbackQueryHandler(callback_help_channel, pattern="^help_channel$"))
     app.add_handler(CallbackQueryHandler(callback_gen_usernames, pattern="^gen_usernames$"))
 
