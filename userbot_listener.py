@@ -477,9 +477,29 @@ async def push_code_to_sse(code: str, message: str = ""):
         sse_clients.remove(d)
 
 
+@web.middleware
+async def cors_middleware(request, handler):
+    """Add CORS headers to all responses."""
+    # Handle preflight
+    if request.method == "OPTIONS":
+        return web.Response(
+            status=204,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type",
+                "Access-Control-Max-Age": "86400",
+            }
+        )
+
+    resp = await handler(request)
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    return resp
+
+
 async def start_http_server():
     """Start the HTTP API server on Railway's PORT."""
-    app = web.Application()
+    app = web.Application(middlewares=[cors_middleware])
     app.router.add_get("/api/stream", handle_sse)
     app.router.add_get("/api/status", handle_status)
     app.router.add_get("/api/codes", handle_get_codes)
@@ -523,10 +543,10 @@ async def handle_activate(request: web.Request) -> web.Response:
     """POST /api/activate — validate an activation code."""
     data = await request.json()
     code = data.get("code", "").strip().upper()
-    
+
     if not code:
         return web.json_response({"valid": False, "message": "No code provided"}, status=400)
-    
+
     result = validate_activation_code(code)
     log.info("Activation attempt for code: %s — %s", code, result["message"])
     return web.json_response(result)
