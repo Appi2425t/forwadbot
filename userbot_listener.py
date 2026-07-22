@@ -84,13 +84,40 @@ claimed_codes: set[str] = set()
 MAX_PENDING = 50
 
 # ---------------------------------------------------------------------------
-# Activation codes store
+# Activation codes store (JSON file persistence)
 # ---------------------------------------------------------------------------
 import uuid
 import hashlib
+import json
 
+ACTIVATION_CODES_FILE = os.path.join(os.path.dirname(__file__), "activation_codes.json")
 activation_codes: dict[str, dict] = {}  # code -> {created_at, used_by, expires_at}
 ADMIN_USER_IDS = [int(x) for x in os.environ.get('ADMIN_USER_IDS', '').split(',') if x]
+
+
+def load_activation_codes():
+    """Load activation codes from JSON file."""
+    global activation_codes
+    try:
+        if os.path.exists(ACTIVATION_CODES_FILE):
+            with open(ACTIVATION_CODES_FILE, "r") as f:
+                activation_codes = json.load(f)
+            log.info("Loaded %d activation codes from file", len(activation_codes))
+        else:
+            activation_codes = {}
+            log.info("No activation codes file found, starting empty")
+    except Exception as e:
+        log.error("Failed to load activation codes: %s", e)
+        activation_codes = {}
+
+
+def save_activation_codes():
+    """Save activation codes to JSON file."""
+    try:
+        with open(ACTIVATION_CODES_FILE, "w") as f:
+            json.dump(activation_codes, f, indent=2)
+    except Exception as e:
+        log.error("Failed to save activation codes: %s", e)
 
 
 def generate_activation_code(duration_days: int = 30) -> str:
@@ -128,18 +155,51 @@ def validate_activation_code(code: str) -> dict:
 
 
 def store_activation_code(code: str, duration_days: int = 30) -> dict:
-    """Store a new activation code with expiration."""
+    """Store a new activation code with expiration.
+    duration_days=0 means permanent (no expiration).
+    """
     from datetime import datetime, timedelta, timezone
     now = datetime.now(timezone.utc)
-    expires = now + timedelta(days=duration_days)
-    
-    activation_codes[code] = {
-        "created_at": now.isoformat(),
-        "expires_at": expires.isoformat(),
-        "duration_days": duration_days,
-        "used_by": None
-    }
-    return {"code": code, "expires_at": expires.isoformat()}
+
+    if duration_days == 0:
+        # Permanent code — no expiration
+        activation_codes[code] = {
+            "created_at": now.isoformat(),
+            "expires_at": None,
+            "duration_days": 0,
+            "used_by": None
+        }
+        save_activation_codes()
+        return {"code": code, "expires_at": "permanent"}
+    else:
+        expires = now + timedelta(days=duration_days)
+        activation_codes[code] = {
+            "created_at": now.isoformat(),
+            "expires_at": expires.isoformat(),
+            "duration_days": duration_days,
+            "used_by": None
+        }
+        save_activation_codes()
+        return {"code": code, "expires_at": expires.isoformat()}
+
+
+# Duration presets for /genkey command
+DURATION_PRESETS = {
+    "1d": 1,
+    "1day": 1,
+    "7d": 7,
+    "7days": 7,
+    "1w": 7,
+    "1week": 7,
+    "30d": 30,
+    "30days": 30,
+    "1m": 30,
+    "1month": 30,
+    "perm": 0,
+    "permanent": 0,
+    "forever": 0,
+    "lifetime": 0,
+}
 
 # ---------------------------------------------------------------------------
 # NFT-style Username Generator
@@ -358,8 +418,8 @@ async def handle_sse(request: web.Request) -> web.StreamResponse:
     log.info("SSE client connected (%d total)", len(sse_clients))
 
     try:
-        # Send initial heartbeat
-        await response.write(b"event: connected\ndata: ok\n\n")
+        # Send initial connection confirmation (unnamed event for MV3 compatibility)
+        await response.write(b'data: {"type":"connected"}\n\n')
 
         # Keep connection alive, wait for disconnect
         while True:
@@ -376,10 +436,12 @@ async def handle_sse(request: web.Request) -> web.StreamResponse:
 
 
 async def push_code_to_sse(code: str, message: str = ""):
-    """Broadcast a code to all connected SSE clients."""
+    """Broadcast a code to all connected SSE clients.
+    Uses unnamed events (onmessage) to avoid Chrome MV3 named event bug.
+    """
     import json as _json
-    data = _json.dumps({"code": code, "message": message})
-    payload = f"event: code\ndata: {data}\n\n"
+    data = _json.dumps({"type": "code", "code": code, "message": message})
+    payload = f"data: {data}\n\n"
     dead = []
     for client in sse_clients:
         try:
@@ -468,6 +530,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("👥 Add to Group", url=add_group_url)],
         [InlineKeyboardButton("📢 How to Add to Channel", callback_data="help_channel")],
+        [InlineKeyboardButton("🔑 Activate Extension", callback_data="help_activate")],
         [InlineKeyboardButton("🎲 Generate NFT Usernames", callback_data="gen_usernames")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -478,6 +541,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "**Choose an option below:**\n"
         "• **Group** — tap the button to add me directly\n"
         "• **Channel** — I'll show you how to add me as admin\n"
+        "• **Activate** — get help activating the Stake Claimer extension\n"
         "• **NFT Usernames** — generate cool available usernames"
     )
     await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
@@ -558,7 +622,14 @@ async def callback_gen_usernames(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def cmd_genkey(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Generate activation codes for Stake Claimer extension."""
+    """Generate activation codes for Stake Claimer extension.
+    
+    Usage: /genkey [count] [duration]
+    Duration can be: 1d, 7d, 30d, perm (or 1, 7, 30, 0 for days)
+    Default: 1 code, 30 days
+    
+    If called without arguments, shows duration selection buttons.
+    """
     user_id = update.effective_user.id
     
     # Check if user is admin
@@ -566,21 +637,63 @@ async def cmd_genkey(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ You don't have permission to generate keys.")
         return
     
-    # Parse arguments: /genkey [count] [duration_days]
+    # If no arguments, show duration selection buttons
+    if not context.args:
+        keyboard = [
+            [
+                InlineKeyboardButton("⏱ 1 Day", callback_data="genkey_1d"),
+                InlineKeyboardButton("📅 7 Days", callback_data="genkey_7d"),
+            ],
+            [
+                InlineKeyboardButton("📆 30 Days", callback_data="genkey_30d"),
+                InlineKeyboardButton("♾ Permanent", callback_data="genkey_perm"),
+            ],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        text = (
+            "🔑 **Generate Activation Code**\n\n"
+            "Select a duration for the activation code:\n\n"
+            "• **1 Day** — Trial access\n"
+            "• **7 Days** — Weekly pass\n"
+            "• **30 Days** — Monthly pass\n"
+            "• **Permanent** — Lifetime access"
+        )
+        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+        return
+    
+    # Parse arguments
     args = context.args
     count = 1
     duration_days = 30
+    duration_label = "30 days"
     
     if args:
-        try:
-            count = min(int(args[0]), 10)  # Max 10 keys at once
-        except ValueError:
-            pass
+        # First arg could be count or duration
+        first = args[0].lower()
+        
+        # Check if it's a duration preset
+        if first in DURATION_PRESETS:
+            duration_days = DURATION_PRESETS[first]
+            duration_label = "permanent" if duration_days == 0 else f"{duration_days} day{'s' if duration_days != 1 else ''}"
+        else:
+            try:
+                count = min(int(args[0]), 10)  # Max 10 keys at once
+            except ValueError:
+                pass
+    
     if len(args) > 1:
-        try:
-            duration_days = int(args[1])
-        except ValueError:
-            pass
+        second = args[1].lower()
+        # Check if second arg is a duration preset
+        if second in DURATION_PRESETS:
+            duration_days = DURATION_PRESETS[second]
+            duration_label = "permanent" if duration_days == 0 else f"{duration_days} day{'s' if duration_days != 1 else ''}"
+        else:
+            try:
+                duration_days = int(args[1])
+                duration_label = "permanent" if duration_days == 0 else f"{duration_days} day{'s' if duration_days != 1 else ''}"
+            except ValueError:
+                pass
     
     # Generate codes
     codes = []
@@ -593,7 +706,13 @@ async def cmd_genkey(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text_lines = [f"🔑 **Generated {len(codes)} Activation Code(s):**\n"]
     for i, code in enumerate(codes, 1):
         text_lines.append(f"`{code}`")
-    text_lines.append(f"\n⏰ Duration: {duration_days} days")
+    text_lines.append(f"\n⏰ Duration: **{duration_label}**")
+    
+    if duration_days == 0:
+        text_lines.append("♾️ *This code never expires.*")
+    else:
+        text_lines.append(f"📅 *Expires {duration_label} from now.*")
+    
     text_lines.append("\n💡 *Send these codes to users to activate the extension.*")
     
     await update.message.reply_text("\n".join(text_lines), parse_mode="Markdown")
@@ -641,6 +760,106 @@ async def callback_help_channel(update: Update, context: ContextTypes.DEFAULT_TY
     ).format(bot=context.bot.username)
 
     await query.edit_message_text(text, parse_mode="Markdown")
+
+
+async def callback_help_activate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show instructions for activating the Stake Claimer extension."""
+    query = update.callback_query
+    await query.answer()
+
+    text = (
+        "🔑 **How to Activate Stake Claimer Extension:**\n\n"
+        "**Step 1:** Install the Stake Claimer Chrome extension\n\n"
+        "**Step 2:** Click the extension icon in your browser\n\n"
+        "**Step 3:** Enter your activation code in the popup\n\n"
+        "**Step 4:** Click **Activate** — you're all set!\n\n"
+        "---\n\n"
+        "**Duration Options:**\n"
+        "• `1d` — 1 day trial\n"
+        "• `7d` — 1 week\n"
+        "• `30d` — 1 month\n"
+        "• `perm` — Permanent (never expires)\n\n"
+        "**Need a code?** Contact an admin to generate one.\n\n"
+        "**Admin Command:**\n"
+        "`/genkey [count] [duration]`\n"
+        "Example: `/genkey 5 7d` — generates 5 codes valid for 7 days"
+    )
+
+    await query.edit_message_text(text, parse_mode="Markdown")
+
+
+async def callback_genkey_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle duration selection buttons for genkey command."""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = update.effective_user.id
+    
+    # Check if user is admin
+    if ADMIN_USER_IDS and user_id not in ADMIN_USER_IDS:
+        await query.edit_message_text("❌ You don't have permission to generate keys.")
+        return
+    
+    # Parse duration from callback data
+    data = query.data  # e.g., "genkey_1d", "genkey_perm"
+    duration_key = data.replace("genkey_", "")
+    
+    if duration_key not in DURATION_PRESETS:
+        await query.edit_message_text("❌ Invalid duration selected.")
+        return
+    
+    duration_days = DURATION_PRESETS[duration_key]
+    duration_label = "permanent" if duration_days == 0 else f"{duration_days} day{'s' if duration_days != 1 else ''}"
+    
+    # Generate 1 code
+    code = generate_activation_code(duration_days)
+    store_activation_code(code, duration_days)
+    
+    # Format response
+    text_lines = [f"🔑 **Activation Code Generated:**\n"]
+    text_lines.append(f"`{code}`")
+    text_lines.append(f"\n⏰ Duration: **{duration_label}**")
+    
+    if duration_days == 0:
+        text_lines.append("♾️ *This code never expires.*")
+    else:
+        text_lines.append(f"📅 *Expires {duration_label} from now.*")
+    
+    text_lines.append("\n💡 *Send this code to a user to activate the extension.*")
+    
+    # Add button to generate another
+    keyboard = [
+        [
+            InlineKeyboardButton("🔄 Generate Another", callback_data="genkey_again"),
+        ],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text("\n".join(text_lines), reply_markup=reply_markup, parse_mode="Markdown")
+
+
+async def callback_genkey_again(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show duration selection buttons again."""
+    query = update.callback_query
+    await query.answer()
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("⏱ 1 Day", callback_data="genkey_1d"),
+            InlineKeyboardButton("📅 7 Days", callback_data="genkey_7d"),
+        ],
+        [
+            InlineKeyboardButton("📆 30 Days", callback_data="genkey_30d"),
+            InlineKeyboardButton("♾ Permanent", callback_data="genkey_perm"),
+        ],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    text = (
+        "🔑 **Generate Activation Code**\n\n"
+        "Select a duration for the activation code:"
+    )
+    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="Markdown")
 
 
 # ---------------------------------------------------------------------------
@@ -713,6 +932,9 @@ async def main():
     log.info("Starting Telegram forwarder...")
     log.info("Source group: %s | Dest group: %s", cfg["SOURCE_GROUP_ID"], cfg["DEST_GROUP_ID"])
 
+    # Load activation codes from file
+    load_activation_codes()
+
     # Start HTTP API server
     await start_http_server()
 
@@ -724,7 +946,10 @@ async def main():
     app.add_handler(CommandHandler("genkey", cmd_genkey))
     app.add_handler(CommandHandler("keys", cmd_list_keys))
     app.add_handler(CallbackQueryHandler(callback_help_channel, pattern="^help_channel$"))
+    app.add_handler(CallbackQueryHandler(callback_help_activate, pattern="^help_activate$"))
     app.add_handler(CallbackQueryHandler(callback_gen_usernames, pattern="^gen_usernames$"))
+    app.add_handler(CallbackQueryHandler(callback_genkey_duration, pattern="^genkey_(1d|7d|30d|perm)$"))
+    app.add_handler(CallbackQueryHandler(callback_genkey_again, pattern="^genkey_again$"))
 
     await app.initialize()
     await app.start()
