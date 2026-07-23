@@ -561,17 +561,29 @@ async def handle_claimed(request: web.Request) -> web.Response:
 
 async def handle_activate(request: web.Request) -> web.Response:
     """POST /api/activate — validate an activation code."""
+    # Handle CORS preflight
+    if request.method == "OPTIONS":
+        resp = web.Response(status=204)
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        return resp
+
     data = await request.json()
     code = data.get("code", "").strip().upper()
-    user_id = data.get("user_id", "")  # Stake account fingerprint
-    username = data.get("username", "")  # Stake username
+    user_id = data.get("user_id", "")
+    username = data.get("username", "")
 
     if not code:
-        return web.json_response({"valid": False, "message": "No code provided"}, status=400)
+        resp = web.json_response({"valid": False, "message": "No code provided"}, status=400)
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        return resp
 
     result = validate_activation_code(code, user_id, username)
     log.info("Activation attempt for code: %s user: %s username: %s — %s", code, user_id or "none", username or "none", result["message"])
-    return web.json_response(result)
+    resp = web.json_response(result)
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    return resp
 
 
 async def handle_validate_activation(request: web.Request) -> web.Response:
