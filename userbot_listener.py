@@ -148,9 +148,10 @@ def generate_activation_code(duration_days: int = 30) -> str:
             return code
 
 
-def validate_activation_code(code: str, user_id: str = None) -> dict:
+def validate_activation_code(code: str, user_id: str = None, username: str = None) -> dict:
     """Validate an activation code. Returns {valid: bool, message: str, expires_at: str}.
     user_id: unique identifier for the stake account (fingerprint).
+    username: stake username for display.
     """
     # Master code from environment variable (always works, survives restarts)
     master_code = os.environ.get("MASTER_ACTIVATION_CODE", "").strip().upper()
@@ -176,11 +177,14 @@ def validate_activation_code(code: str, user_id: str = None) -> dict:
 
     # Check if code is already bound to a different account
     if user_id and entry.get("bound_to") and entry["bound_to"] != user_id:
-        return {"valid": False, "message": "Code already used on another account"}
+        bound_name = entry.get("bound_username", "another account")
+        return {"valid": False, "message": f"Code already used on {bound_name}"}
 
     # Bind code to this account (first use wins)
     if user_id and not entry.get("bound_to"):
         entry["bound_to"] = user_id
+        if username:
+            entry["bound_username"] = username
         save_activation_codes()
 
     return {
@@ -188,7 +192,8 @@ def validate_activation_code(code: str, user_id: str = None) -> dict:
         "message": "Activation code is valid",
         "expires_at": entry.get("expires_at"),
         "created_at": entry.get("created_at"),
-        "bound_to": entry.get("bound_to")
+        "bound_to": entry.get("bound_to"),
+        "username": entry.get("bound_username", username or "")
     }
 
 
@@ -505,6 +510,9 @@ async def cors_middleware(request, handler):
         )
 
     resp = await handler(request)
+    # Don't touch streaming responses at all (SSE)
+    if isinstance(resp, web.StreamResponse):
+        return resp
     resp.headers["Access-Control-Allow-Origin"] = "*"
     return resp
 
@@ -556,12 +564,13 @@ async def handle_activate(request: web.Request) -> web.Response:
     data = await request.json()
     code = data.get("code", "").strip().upper()
     user_id = data.get("user_id", "")  # Stake account fingerprint
+    username = data.get("username", "")  # Stake username
 
     if not code:
         return web.json_response({"valid": False, "message": "No code provided"}, status=400)
 
-    result = validate_activation_code(code, user_id)
-    log.info("Activation attempt for code: %s user: %s — %s", code, user_id or "none", result["message"])
+    result = validate_activation_code(code, user_id, username)
+    log.info("Activation attempt for code: %s user: %s username: %s — %s", code, user_id or "none", username or "none", result["message"])
     return web.json_response(result)
 
 
